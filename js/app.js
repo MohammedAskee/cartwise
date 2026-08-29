@@ -915,60 +915,15 @@ function extractProductFromHtml(html) {
   };
 }
 
-async function tryFetchUrl(url) {
-  if (!url) return toast("Paste a link first.", "error");
-  let normalized = url.trim();
-  if (!/^https?:\/\//i.test(normalized)) normalized = `https://${normalized}`;
-  try {
-    // eslint-disable-next-line no-new
-    new URL(normalized);
-  } catch {
-    return toast("That does not look like a valid link.", "error");
-  }
-
-  toast("Reading page…");
-  const proxies = [
-    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-    (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-    (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-  ];
-
-  let html = null;
-  for (const make of proxies) {
-    try {
-      const res = await fetch(make(normalized), {
-        signal: AbortSignal.timeout(12000),
-        headers: { Accept: "text/html,*/*" },
-      });
-      if (!res.ok) continue;
-      const text = await res.text();
-      if (text && text.length > 200 && /<html|<head|<meta|ld\+json/i.test(text)) {
-        html = text;
-        break;
-      }
-    } catch {
-      /* try next proxy */
-    }
-  }
-
-  if ($("#p-url")) $("#p-url").value = normalized;
-
-  if (!html) {
-    toast(
-      "Could not read this store page (blocked by CORS). Paste the name, price, and photo manually — the link is still saved for reference.",
-      "error",
-    );
-    return;
-  }
-
-  const { title, desc, image, price, pcs } = extractProductFromHtml(html);
+function applyExtractedFields({ title, description, desc, image, price, pcs }) {
   let filled = 0;
+  const d = description || desc || "";
   if ($("#p-name") && title) {
     $("#p-name").value = title;
     filled++;
   }
-  if ($("#p-desc") && desc) {
-    $("#p-desc").value = desc;
+  if ($("#p-desc") && d) {
+    $("#p-desc").value = d;
     filled++;
   }
   if ($("#p-item") && price) {
@@ -984,9 +939,92 @@ async function tryFetchUrl(url) {
     if ($("#p-thumb-wrap")) $("#p-thumb-wrap").innerHTML = thumbHtml(image);
     filled++;
   }
+  return filled;
+}
 
+/** Primary path: Vercel /api/extract (server-side, no CORS). */
+async function extractViaApi(normalized) {
+  const res = await fetch(`/api/extract?url=${encodeURIComponent(normalized)}`, {
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) {
+    let msg = `Extract failed (${res.status})`;
+    try {
+      const body = await res.json();
+      if (body?.error) msg = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+/**
+ * Local-dev fallback only. Public proxies often 403 marketplace sites —
+ * failures are swallowed so the console stays clean.
+ */
+async function extractViaProxyFallback(normalized) {
+  const proxies = [
+    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+  ];
+  for (const make of proxies) {
+    try {
+      const res = await fetch(make(normalized), {
+        signal: AbortSignal.timeout(10000),
+        headers: { Accept: "text/html,*/*" },
+      });
+      if (!res.ok) continue;
+      const text = await res.text();
+      if (text && text.length > 200 && /<html|<head|<meta|ld\+json/i.test(text)) {
+        return extractProductFromHtml(text);
+      }
+    } catch {
+      /* silent — proxies are unreliable by design */
+    }
+  }
+  return null;
+}
+
+async function tryFetchUrl(url) {
+  if (!url) return toast("Paste a link first.", "error");
+  let normalized = url.trim();
+  if (!/^https?:\/\//i.test(normalized)) normalized = `https://${normalized}`;
+  try {
+    // eslint-disable-next-line no-new
+    new URL(normalized);
+  } catch {
+    return toast("That does not look like a valid link.", "error");
+  }
+
+  if ($("#p-url")) $("#p-url").value = normalized;
+  toast("Reading page…");
+
+  let data = null;
+
+  // 1) Server-side extract (works on Vercel for Daraz, Amazon, …)
+  try {
+    data = await extractViaApi(normalized);
+  } catch {
+    // 2) Quiet proxy fallback for local static servers without /api
+    data = await extractViaProxyFallback(normalized);
+  }
+
+  if (!data) {
+    toast(
+      "Could not read this page. Deploy to Vercel so /api/extract can fetch it, or enter name, price, and photo manually — the link is still saved.",
+      "error",
+    );
+    return;
+  }
+
+  const filled = applyExtractedFields(data);
   if (filled === 0) {
-    toast("Page opened but no product fields found. Enter details manually.", "error");
+    toast(
+      "Page loaded but no product fields found (some shops hide data in scripts). Enter details manually.",
+      "error",
+    );
   } else {
     toast(`Pulled ${filled} field${filled === 1 ? "" : "s"} — double-check price before saving.`);
   }
