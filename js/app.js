@@ -803,29 +803,46 @@ function openProductModal(existing = null, onSaved = null) {
   });
 }
 
-async function tryFetchUrl(url) {
-  if (!url) return toast("Paste a link first.", "error");
-  toast("Reading page…");
-  const proxies = [
-    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-    (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-  ];
-  let html = null;
-  for (const make of proxies) {
+function decodeEntities(s) {
+  if (!s) return "";
+  const t = document.createElement("textarea");
+  t.innerHTML = s;
+  return t.value.replace(/\s+/g, " ").trim();
+}
+
+function parseJsonLdProducts(html) {
+  const out = [];
+  const re = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html))) {
     try {
-      const res = await fetch(make(url), { signal: AbortSignal.timeout(10000) });
-      if (res.ok) {
-        html = await res.text();
-        break;
+      const data = JSON.parse(m[1].trim());
+      const nodes = Array.isArray(data) ? data : data["@graph"] ? data["@graph"] : [data];
+      for (const node of nodes) {
+        if (!node || typeof node !== "object") continue;
+        const type = node["@type"];
+        const types = Array.isArray(type) ? type : [type];
+        if (types.some((t) => /Product/i.test(String(t || "")))) out.push(node);
       }
     } catch {
-      /* try next */
+      /* ignore bad JSON-LD */
     }
   }
-  if (!html) {
-    toast("Could not read that page (CORS). Enter details manually.", "error");
-    return;
+  return out;
+}
+
+function priceFromOffers(offers) {
+  if (!offers) return "";
+  const list = Array.isArray(offers) ? offers : [offers];
+  for (const o of list) {
+    if (!o) continue;
+    const p = o.price ?? o.lowPrice ?? o.highPrice;
+    if (p != null && p !== "") return String(p);
   }
+  return "";
+}
+
+function extractProductFromHtml(html) {
   const meta = (prop) => {
     const re = new RegExp(
       `<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`,
@@ -837,25 +854,142 @@ async function tryFetchUrl(url) {
     );
     return html.match(re)?.[1] || html.match(re2)?.[1] || "";
   };
-  const title =
+
+  const jsonLd = parseJsonLdProducts(html)[0];
+  let title =
+    (jsonLd && (jsonLd.name || jsonLd.title)) ||
     meta("og:title") ||
-    html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() ||
+    meta("twitter:title") ||
+    html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ||
     "";
-  const desc = meta("og:description") || meta("description") || "";
-  const image = meta("og:image") || meta("twitter:image") || "";
-  const priceRaw = meta("product:price:amount") || meta("og:price:amount") || "";
-  const price = priceRaw.match(/(\d+(?:\.\d+)?)/)?.[1] || "";
-  const pcsMatch = (title + " " + desc).match(/(\d+)\s*(?:pcs|pieces|pack|ct|-pack)/i);
-  if ($("#p-name") && title) $("#p-name").value = title.replace(/&amp;/g, "&").slice(0, 160);
-  if ($("#p-desc") && desc) $("#p-desc").value = desc.replace(/&amp;/g, "&").slice(0, 600);
-  if ($("#p-url")) $("#p-url").value = url;
-  if ($("#p-item") && price) $("#p-item").value = price;
-  if ($("#p-pcs") && pcsMatch) $("#p-pcs").value = pcsMatch[1];
+  let desc =
+    (jsonLd && (jsonLd.description || jsonLd.about)) ||
+    meta("og:description") ||
+    meta("description") ||
+    meta("twitter:description") ||
+    "";
+  let image =
+    (jsonLd &&
+      (typeof jsonLd.image === "string"
+        ? jsonLd.image
+        : Array.isArray(jsonLd.image)
+          ? jsonLd.image[0]?.url || jsonLd.image[0]
+          : jsonLd.image?.url || jsonLd.image?.contentUrl)) ||
+    meta("og:image") ||
+    meta("twitter:image") ||
+    meta("og:image:secure_url") ||
+    "";
+
+  let priceRaw =
+    (jsonLd && priceFromOffers(jsonLd.offers)) ||
+    meta("product:price:amount") ||
+    meta("og:price:amount") ||
+    meta("twitter:data1") ||
+    "";
+
+  if (!priceRaw) {
+    const bodyPrice = html.match(
+      /(?:Rs\.?|PKR|USD|\$|EUR|€|£)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)/i,
+    );
+    if (bodyPrice) priceRaw = bodyPrice[1];
+  }
+
+  const price = String(priceRaw)
+    .replace(/,/g, "")
+    .match(/(\d+(?:\.\d+)?)/)?.[1] || "";
+
+  title = decodeEntities(String(title)).slice(0, 160);
+  desc = decodeEntities(String(desc)).slice(0, 600);
+  image = decodeEntities(String(image));
+
+  const pcsMatch = `${title} ${desc}`.match(
+    /(\d+)\s*(?:pcs|pieces|pack|ct|count|-pack|pc\b)/i,
+  );
+
+  return {
+    title,
+    desc,
+    image,
+    price,
+    pcs: pcsMatch?.[1] || "",
+  };
+}
+
+async function tryFetchUrl(url) {
+  if (!url) return toast("Paste a link first.", "error");
+  let normalized = url.trim();
+  if (!/^https?:\/\//i.test(normalized)) normalized = `https://${normalized}`;
+  try {
+    // eslint-disable-next-line no-new
+    new URL(normalized);
+  } catch {
+    return toast("That does not look like a valid link.", "error");
+  }
+
+  toast("Reading page…");
+  const proxies = [
+    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+  ];
+
+  let html = null;
+  for (const make of proxies) {
+    try {
+      const res = await fetch(make(normalized), {
+        signal: AbortSignal.timeout(12000),
+        headers: { Accept: "text/html,*/*" },
+      });
+      if (!res.ok) continue;
+      const text = await res.text();
+      if (text && text.length > 200 && /<html|<head|<meta|ld\+json/i.test(text)) {
+        html = text;
+        break;
+      }
+    } catch {
+      /* try next proxy */
+    }
+  }
+
+  if ($("#p-url")) $("#p-url").value = normalized;
+
+  if (!html) {
+    toast(
+      "Could not read this store page (blocked by CORS). Paste the name, price, and photo manually — the link is still saved for reference.",
+      "error",
+    );
+    return;
+  }
+
+  const { title, desc, image, price, pcs } = extractProductFromHtml(html);
+  let filled = 0;
+  if ($("#p-name") && title) {
+    $("#p-name").value = title;
+    filled++;
+  }
+  if ($("#p-desc") && desc) {
+    $("#p-desc").value = desc;
+    filled++;
+  }
+  if ($("#p-item") && price) {
+    $("#p-item").value = price;
+    filled++;
+  }
+  if ($("#p-pcs") && pcs) {
+    $("#p-pcs").value = pcs;
+    filled++;
+  }
   if ($("#p-image") && image) {
     $("#p-image").value = image;
     if ($("#p-thumb-wrap")) $("#p-thumb-wrap").innerHTML = thumbHtml(image);
+    filled++;
   }
-  toast("Details pulled where possible — check prices before saving.");
+
+  if (filled === 0) {
+    toast("Page opened but no product fields found. Enter details manually.", "error");
+  } else {
+    toast(`Pulled ${filled} field${filled === 1 ? "" : "s"} — double-check price before saving.`);
+  }
 }
 
 async function openAddToTrip(productId, fixedTripId = null) {
