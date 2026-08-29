@@ -8,11 +8,16 @@ Static web app with **Firebase Authentication** (email/password) and **Firestore
 
 - Email sign-up / sign-in
 - Catalog: name, notes, image, price per item / box, pieces per box
+- Paste a product link to auto-fill title, description, image, and price when possible
 - Lists with budget meter and currencies
 - Item vs box pricing + “I need N pieces” suggestions
 - Shop mode checklist
 - Sample data seed
 - JSON export backup
+
+## Product link extraction
+
+Browsers block most store sites (Daraz, Amazon, etc.) from being read directly. Cartwise tries public CORS proxies and parses Open Graph + JSON-LD. When a site blocks those proxies you will see a clear message — **paste name, price, and photo manually**; the URL is still stored for reference. A future small backend can make extraction reliable for every shop.
 
 ## Firebase setup (required once)
 
@@ -95,6 +100,12 @@ README.md
 ## Security note
 
 Firebase web API keys are public in client apps. Data is protected by **Authentication + Firestore rules** (users only read/write their own `userId` documents). Do not open rules to `allow read, write: if true`.
+
+## Troubleshooting
+
+- **`firestore.googleapis.com/... ERR_BLOCKED_BY_CLIENT`** — an ad blocker or privacy extension is blocking Firestore’s long-poll channel. Whitelist your app domain (and `firestore.googleapis.com`) or disable the blocker on this site. Lists usually still load after a refresh.
+- **Product link 403 on `corsproxy.io`** — ignore if you still see that on an old deploy. Redeploy so the app uses `/api/extract` instead of public proxies.
+- **Fetch works only after Vercel deploy** — expected. Server extract requires the `api/extract.js` function.
 
 ## License
 
