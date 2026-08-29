@@ -685,11 +685,29 @@ function openTripModal() {
 
 function openProductModal(existing = null, onSaved = null) {
   const p = existing || {};
+  // Prefer stored defaultUnit; if only box price exists, start on box
+  let priceMode =
+    p.defaultUnit === "box"
+      ? "box"
+      : p.defaultUnit === "item"
+        ? "item"
+        : p.pricePerBox > 0 && !(p.pricePerItem > 0)
+          ? "box"
+          : "item";
+  const initialPrice =
+    priceMode === "box"
+      ? p.pricePerBox > 0
+        ? p.pricePerBox
+        : ""
+      : p.pricePerItem > 0
+        ? p.pricePerItem
+        : "";
+
   openModal(`
     <div class="modal-header">
       <div>
         <h2>${existing ? "Edit product" : "Add to catalog"}</h2>
-        <p class="modal-desc">Set how it is sold — by the piece or by the box — so lists can compare both.</p>
+        <p class="modal-desc">Price is either per item or per box — not both. Pieces per box auto-fills the other side.</p>
       </div>
       <button type="button" class="modal-close" data-close>×</button>
     </div>
@@ -698,6 +716,7 @@ function openProductModal(existing = null, onSaved = null) {
         <label for="p-url">Product link (optional)</label>
         <div class="flex-gap">
           <input class="input" id="p-url" style="flex:1" placeholder="https://…" value="${escapeHtml(p.sourceUrl || "")}" />
+          <button type="button" class="btn btn-outline" id="p-paste" title="Paste from clipboard">Paste</button>
           <button type="button" class="btn btn-secondary" id="p-fetch">Fetch</button>
         </div>
       </div>
@@ -717,43 +736,71 @@ function openProductModal(existing = null, onSaved = null) {
         <label for="p-desc">Notes</label>
         <textarea class="textarea" id="p-desc" placeholder="Flavour, size, aisle…">${escapeHtml(p.description || "")}</textarea>
       </div>
-      <div class="grid-2">
-        <div class="field">
-          <label for="p-item">Price per item</label>
-          <input class="input" id="p-item" inputmode="decimal" value="${p.pricePerItem || ""}" placeholder="0.45" />
-        </div>
-        <div class="field">
-          <label for="p-box">Price per box</label>
-          <input class="input" id="p-box" inputmode="decimal" value="${p.pricePerBox || ""}" placeholder="3.99" />
+      <div class="field">
+        <label>Price is for</label>
+        <div class="segment" id="p-mode">
+          <button type="button" data-mode="item" class="${priceMode === "item" ? "active" : ""}">Per item</button>
+          <button type="button" data-mode="box" class="${priceMode === "box" ? "active" : ""}">Per box</button>
         </div>
       </div>
       <div class="grid-2">
+        <div class="field">
+          <label for="p-price" id="p-price-label">${priceMode === "box" ? "Price per box" : "Price per item"}</label>
+          <input class="input" id="p-price" inputmode="decimal" value="${initialPrice}" placeholder="${priceMode === "box" ? "3.99" : "0.45"}" />
+        </div>
         <div class="field">
           <label for="p-pcs">Pieces per box</label>
           <input class="input" id="p-pcs" inputmode="numeric" value="${p.pcsPerBox || ""}" placeholder="10" />
         </div>
-        <div class="field">
-          <label>Default unit</label>
-          <div class="segment" id="p-unit">
-            <button type="button" data-unit="item" class="${(p.defaultUnit || "item") === "item" ? "active" : ""}">Item</button>
-            <button type="button" data-unit="box" class="${p.defaultUnit === "box" ? "active" : ""}">Box</button>
-          </div>
-        </div>
       </div>
+      <p class="text-muted" id="p-derived" style="font-size:0.8125rem;margin:0"></p>
       <div class="modal-footer">
         <button type="button" class="btn btn-ghost" data-close>Cancel</button>
         <button type="submit" class="btn btn-primary">Save product</button>
       </div>
     </form>`);
 
-  let defaultUnit = p.defaultUnit === "box" ? "box" : "item";
+  function refreshDerived() {
+    const label = $("#p-price-label");
+    const priceInput = $("#p-price");
+    if (label) label.textContent = priceMode === "box" ? "Price per box" : "Price per item";
+    if (priceInput) priceInput.placeholder = priceMode === "box" ? "3.99" : "0.45";
+    const prices = derivePrices({
+      mode: priceMode,
+      price: priceInput?.value === "" ? null : Number(priceInput.value),
+      pcsPerBox: $("#p-pcs").value === "" ? null : Number($("#p-pcs").value),
+    });
+    const hint = $("#p-derived");
+    if (!hint) return;
+    const pcs = Number($("#p-pcs").value) || 0;
+    if (pcs <= 0) {
+      hint.textContent =
+        priceMode === "item"
+          ? "Add pieces per box to auto-calculate price per box."
+          : "Add pieces per box to auto-calculate price per item.";
+      return;
+    }
+    if (priceMode === "item" && prices.pricePerItem > 0) {
+      hint.textContent = `Auto: ${formatMoney(prices.pricePerBox)} per box (${pcs} × item price).`;
+    } else if (priceMode === "box" && prices.pricePerBox > 0) {
+      hint.textContent = `Auto: ${formatMoney(prices.pricePerItem)} per item (box ÷ ${pcs}).`;
+    } else {
+      hint.textContent = "";
+    }
+  }
+
   $$("[data-close]").forEach((b) => b.addEventListener("click", closeModal));
-  $$("#p-unit button").forEach((btn) => {
+  $$("#p-mode button").forEach((btn) => {
     btn.addEventListener("click", () => {
-      defaultUnit = btn.dataset.unit;
-      $$("#p-unit button").forEach((b) => b.classList.toggle("active", b.dataset.unit === defaultUnit));
+      priceMode = btn.dataset.mode;
+      $$("#p-mode button").forEach((b) => b.classList.toggle("active", b.dataset.mode === priceMode));
+      refreshDerived();
     });
   });
+  $("#p-price")?.addEventListener("input", refreshDerived);
+  $("#p-pcs")?.addEventListener("input", refreshDerived);
+  refreshDerived();
+
   $("#p-upload").addEventListener("click", () => $("#p-file").click());
   $("#p-file").addEventListener("change", async (e) => {
     const file = e.target.files?.[0];
@@ -766,14 +813,27 @@ function openProductModal(existing = null, onSaved = null) {
       toast(err.message || "Could not use that image", "error");
     }
   });
+
+  $("#p-paste").addEventListener("click", async () => {
+    try {
+      const text = (await navigator.clipboard.readText()).trim();
+      if (!text) return toast("Clipboard is empty.", "error");
+      $("#p-url").value = text;
+      toast("Pasted link");
+    } catch {
+      toast("Could not read clipboard — paste into the link field with Ctrl/Cmd+V.", "error");
+    }
+  });
+
   $("#p-fetch").addEventListener("click", () => tryFetchUrl($("#p-url").value.trim()));
+
   $("#product-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = $("#p-name").value.trim();
     if (!name) return toast("Give this product a name.", "error");
     const prices = derivePrices({
-      pricePerItem: $("#p-item").value === "" ? null : Number($("#p-item").value),
-      pricePerBox: $("#p-box").value === "" ? null : Number($("#p-box").value),
+      mode: priceMode,
+      price: $("#p-price").value === "" ? null : Number($("#p-price").value),
       pcsPerBox: $("#p-pcs").value === "" ? null : Number($("#p-pcs").value),
     });
     try {
@@ -786,7 +846,7 @@ function openProductModal(existing = null, onSaved = null) {
         pricePerItem: prices.pricePerItem,
         pricePerBox: prices.pricePerBox,
         pcsPerBox: $("#p-pcs").value ? Number($("#p-pcs").value) : null,
-        defaultUnit,
+        defaultUnit: priceMode,
       });
       closeModal();
       toast(existing ? "Product updated" : "Saved to catalog");
@@ -926,8 +986,9 @@ function applyExtractedFields({ title, description, desc, image, price, pcs }) {
     $("#p-desc").value = d;
     filled++;
   }
-  if ($("#p-item") && price) {
-    $("#p-item").value = price;
+  // Single price field — respects current Per item / Per box mode
+  if ($("#p-price") && price) {
+    $("#p-price").value = price;
     filled++;
   }
   if ($("#p-pcs") && pcs) {
@@ -939,6 +1000,8 @@ function applyExtractedFields({ title, description, desc, image, price, pcs }) {
     if ($("#p-thumb-wrap")) $("#p-thumb-wrap").innerHTML = thumbHtml(image);
     filled++;
   }
+  // Refresh auto-derived hint if the product modal is open
+  $("#p-price")?.dispatchEvent(new Event("input"));
   return filled;
 }
 
